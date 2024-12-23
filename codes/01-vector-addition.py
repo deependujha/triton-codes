@@ -1,92 +1,11 @@
-# An introduction to Triton
-
-- While programming in triton, think in terms of block and not individual thread.
-
----
-
-## Load & Store tensor in triton
-
-1. `triton.language.load`: Return a tensor of data whose values are loaded from memory at location defined by pointer.
-
-2. `triton.language.store`: Store a tensor of data into memory locations defined by pointer.
-
-> **Mask**: store & load accept an argument `mask`, which if true for an index, does the operation (store/load), else `false` ignores for that index. Don't store/load if mask[idx]=False.
-
----
-
-## Triton JIT
-
-- to mark a function to be executed by cuda (accelerated device), decorate it with `@triton.jit`.
-
----
-
-## `tl.arange(start, end)`
-
-- return value from [start, end). Both, start and end must be power of 2, and end>start.
-
----
-
-## Triton constexpr
-
-- `tl.constexpr` is a special annotation used to indicate that a function parameter must be a **`compile-time constant`**.
-
-```python
-import triton
-import triton.language as tl
-
-@triton.jit
-def my_fn(BLOCK_SIZE: tl.constexpr)
-    ...
-```
-
----
-
-## Triton `program_id` & `num_programs`
-
-- triton launches programs in 3D.
-
-- `tl.program_id(axis)`: Gets the program’s ID along axis.
-- `tl.num_programs(axis)`: Gets the total programs along axis.
-
-- `axis can only be (0,1,2)`
-
-```python
-pid = tl.program_id(0)  # Current program ID on axis 0
-num_progs = tl.num_programs(0)  # Total programs on axis 0
-```
-
----
-
-## Launching a cuda kernel (`calling triton jitted function`)
-
-- To laucn a kernel, we need to specify the dimensions on which we are launching.
-- `meta keyword in lambda fn` is a dictionary passed by triton, that contains all the parameter which we pass while calling the kernel function.
-- Prefer to mark those arguments as `constexpr` in triton kernel function.
-
-```python
-@triton.jit
-def some_kernel_fn(param1, param2,SOME_KEYWORD: tl.constexpr, ...):
-    ...
-
-def calling_kernel():
-    grid = lambda meta: (meta['SOME_KEYWORD']), ) # meta contains all the values that we passed while calling the kernel code. Prefer to mark those arguments in kernel as `constexpr`.
-    some_kernel_fn[grid](arg1, arg2, SOME_KEYWORD=4, ...)
-
-```
-
-- kernel program gets launched on this grid.
-- To identify, which block are we on, and the segment of the vector that we have to work in is given by: `tl.program_id(axis)`.
-
----
-
-## Simple Vector Addition in triton
-
-```python
+import argparse
 import torch
 import triton
 import triton.language as tl
 
 DEVICE = "cuda"
+
+print(f"Using {DEVICE=}")
 
 @triton.jit
 def add_kernel(x_ptr,  # *Pointer* to first input vector.
@@ -137,7 +56,7 @@ def add(x: torch.Tensor, y: torch.Tensor):
 
 def main():
     torch.manual_seed(0)
-    size = 98432
+    size = 10
     x = torch.rand(size, device=DEVICE)
     y = torch.rand(size, device=DEVICE)
     output_torch = x + y
@@ -147,6 +66,44 @@ def main():
     print(f'The maximum difference between torch and triton is '
         f'{torch.max(torch.abs(output_torch - output_triton))}')
 
+
+@triton.testing.perf_report(
+triton.testing.Benchmark(
+    x_names=['size'],  # Argument names to use as an x-axis for the plot.
+    x_vals=[2**i for i in range(12, 28, 1)],  # Different possible values for `x_name`.
+    x_log=True,  # x axis is logarithmic.
+    line_arg='provider',  # Argument name whose value corresponds to a different line in the plot.
+    line_vals=['triton', 'torch'],  # Possible values for `line_arg`.
+    line_names=['Triton', 'Torch'],  # Label name for the lines.
+    styles=[('blue', '-'), ('green', '-')],  # Line styles.
+    ylabel='GB/s',  # Label name for the y-axis.
+    plot_name='vector-add-performance',  # Name for the plot. Used also as a file name for saving the plot.
+    args={},  # Values for function arguments not in `x_names` and `y_name`.
+))
+
+def benchmark(size, provider):
+    x = torch.rand(size, device=DEVICE, dtype=torch.float32)
+    y = torch.rand(size, device=DEVICE, dtype=torch.float32)
+    quantiles = [0.5, 0.2, 0.8]
+    if provider == 'torch':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: x + y, quantiles=quantiles)
+    if provider == 'triton':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: add(x, y), quantiles=quantiles)
+    gbps = lambda ms: 3 * x.numel() * x.element_size() * 1e-9 / (ms * 1e-3)
+    return gbps(ms), gbps(max_ms), gbps(min_ms)
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="A simple script")
+    parser.add_argument("--bench", action="store_true", help="benchmark code")
+
+    args = parser.parse_args()
+    return args
+
+
+
 if __name__ == "__main__":
-    main()
-```
+    args = parse_args()
+    if args.bench:
+        benchmark.run(print_data=True, show_plots=True)
+    else:
+        main()
